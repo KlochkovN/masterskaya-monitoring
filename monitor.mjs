@@ -8,10 +8,15 @@ export const TARGETS = [
   { id: 'yc-api', name: 'API Яндекса напрямую', url: 'https://d5d3p8ndl77ofgvuc29p.uvah0e6r.apigw.yandexcloud.net/auth/me', api: true },
 ];
 export const NETWORKS = [
-  { asn: 9123, country: 'RU', name: 'Timeweb, Россия' },
-  { asn: 49505, country: 'RU', name: 'Selectel, Россия' },
-  { asn: 24940, country: 'FI', name: 'Hetzner, Финляндия' },
+  { asn: 9123, country: 'RU', city: 'Moscow', name: 'Москва — Timeweb' },
+  { asn: 49505, country: 'RU', city: 'Saint Petersburg', name: 'Санкт-Петербург — Selectel' },
+  { asn: 12389, country: 'RU', city: 'Kostroma', name: 'Кострома — Ростелеком' },
+  { asn: 41754, country: 'RU', city: 'Penza', name: 'Пенза — Дом.ру (ЭР-Телеком)' },
+  { asn: 3216, country: 'RU', city: 'Ufa', name: 'Уфа — Билайн (ВымпелКом)' },
+  { asn: 8359, country: 'RU', city: 'Novosibirsk', name: 'Новосибирск — МТС' },
 ];
+export const INTERVAL_MINUTES = 10;
+export const NETWORK_CONFIG = NETWORKS.map(n => `${n.country}:${n.asn}:${n.city}`).join('|');
 const REPO = 'KlochkovN/masterskaya-monitoring';
 const PROVIDER = 'https://api.globalping.io/v1/measurements';
 const MARKER = '<!-- masterskaya-monitor-v1 -->';
@@ -20,9 +25,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function normalize(target, records) {
   return NETWORKS.map(network => {
-    const base = { network: network.name, asn: network.asn, country: network.country,
+    const base = { network: network.name, asn: network.asn, country: network.country, city: network.city,
       status: 'unknown', code: null, ms: null, reason: 'Нет результата из выбранной сети' };
-    const matches = Array.isArray(records) ? records.filter(x => x?.probe?.asn === network.asn && x?.probe?.country === network.country) : [];
+    const matches = Array.isArray(records) ? records.filter(x => x?.probe?.asn === network.asn
+      && x?.probe?.country === network.country && x?.probe?.city === network.city) : [];
     if (matches.length !== 1) return base;
     const r = matches[0].result;
     if (r?.status === 'failed') return { ...base, status: r.failureSource === 'target' ? 'down' : 'unknown', reason: r.failureSource === 'target' ? 'Нет соединения с адресом' : 'Ошибка внешней проверки' };
@@ -62,7 +68,7 @@ export function classify(checks) {
 export function confirm(first, second) {
   return first.map((x, i) => {
     const y = second[i];
-    if (y && x.asn === y.asn && x.country === y.country && x.status === y.status) return y;
+    if (y && x.asn === y.asn && x.country === y.country && x.city === y.city && x.status === y.status) return y;
     return { ...x, status: 'unknown', reason: 'Два измерения расходятся', code: null, ms: null };
   });
 }
@@ -89,7 +95,7 @@ export async function measure(target, fetcher = fetch, wait = sleep) {
     const headers = { 'Content-Type': 'application/json' };
     if (process.env.GLOBALPING_TOKEN) headers.Authorization = `Bearer ${process.env.GLOBALPING_TOKEN}`;
     const body = { type: 'http', target: url.hostname, timeout: 15,
-      locations: NETWORKS.map(x => ({ asn: x.asn, country: x.country, limit: 1 })),
+      locations: NETWORKS.map(x => ({ asn: x.asn, country: x.country, city: x.city, limit: 1 })),
       measurementOptions: { protocol: 'HTTPS', request: { method: 'GET', path: url.pathname, headers: { 'Cache-Control': 'no-cache' } } } };
     const created = await boundedJson(PROVIDER, { method: 'POST', headers, body: JSON.stringify(body) }, fetcher);
     if (!/^[A-Za-z0-9_-]{8,80}$/.test(created.id ?? '')) throw new Error('Invalid measurement');
@@ -146,8 +152,16 @@ export async function main() {
   }));
   for (const target of targets) {
     const tag = `<!-- target:${target.id} -->`;
-    const existing = issues.find(x => owned(x) && x.body.includes(tag));
-    const body = `${MARKER}\n${tag}\n\n@KlochkovN\n\n${target.name}: **${statusText[target.status]}**.\n\nПроверено: ${checkedAt}. [Запуск](${run}).\n\n${table([target])}\n\nЭто проверка публичного входа, не базы и не сохранения записей. «Не удалось подтвердить» не означает доказанный сбой приложения.`;
+    let existing = issues.find(x => owned(x) && x.body.includes(tag));
+    const networkTag = `<!-- networks:${NETWORK_CONFIG} -->`;
+    // A removed probe becoming irrelevant is not evidence that it recovered.
+    // Retire the old incident explicitly and evaluate the new scope separately.
+    if (existing && !existing.body.includes(networkTag)) {
+      await github(`/issues/${existing.number}/comments`, 'POST', { body: `ℹ️ @KlochkovN Состав проверок изменён: теперь только шесть российских сетей. Прежнее предупреждение закрывается из-за изменения набора проверок, а не как подтверждение восстановления исключённой сети.\n\n${checkedAt}. [Запуск](${run}).` });
+      await github(`/issues/${existing.number}`, 'PATCH', { state: 'closed', state_reason: 'not_planned' });
+      existing = undefined;
+    }
+    const body = `${MARKER}\n${tag}\n${networkTag}\n\n@KlochkovN\n\n${target.name}: **${statusText[target.status]}**.\n\nПроверено: ${checkedAt}. [Запуск](${run}).\n\n${table([target])}\n\nЭто проверка публичного входа, не базы и не сохранения записей. «Не удалось подтвердить» не означает доказанный сбой приложения.`;
     if (target.status !== 'up' && !existing) {
       await github('/issues', 'POST', { title: `${target.status === 'unknown' ? '❔' : '🔴'} ${target.name}: ${statusText[target.status]}`, body });
     } else if (target.status === 'up' && existing) {
@@ -158,8 +172,8 @@ export async function main() {
       await github(`/issues/${existing.number}`, 'PATCH', { title: `${target.status === 'unknown' ? '❔' : '🔴'} ${target.name}: ${statusText[target.status]}` });
     }
   }
-  const snapshot = { version: 1, checkedAt, completedAt: new Date().toISOString(), staleAfterSeconds: 900, targets };
-  const summary = `## Последний результат\n\nПроверено: **${snapshot.completedAt}** (UTC). [Запуск](${run}).\n\n**Если результату больше 15 минут — текущая доступность неизвестна.** Эта страница не обновляет свой статус сама при остановке GitHub.\n\n${table(targets)}\n\nПлан: каждые 5 минут; GitHub может задерживать или пропускать запуски. Проверки из дата-центров, не из всех мобильных сетей. Основной сайт и edge используют одну VM. API: ожидается HTTP 401 без входа, база и данные клиентов не читаются.\n\n[История инцидентов](https://github.com/${REPO}/issues?q=is%3Aissue) · [Все запуски](https://github.com/${REPO}/actions)\n`;
+  const snapshot = { version: 1, networkConfig: NETWORK_CONFIG, checkedAt, completedAt: new Date().toISOString(), staleAfterSeconds: 900, targets };
+  const summary = `## Последний результат\n\nПроверено: **${snapshot.completedAt}** (UTC). [Запуск](${run}).\n\n**Если результату больше 15 минут — текущая доступность неизвестна.** Эта страница не обновляет свой статус сама при остановке GitHub.\n\n${table(targets)}\n\nПлан: каждые ${INTERVAL_MINUTES} минут; GitHub может задерживать или пропускать запуски. Проверки из шести российских городов и сетей: дата-центры и сети доступа. Узел в сети МТС или Билайна не гарантирует проверку именно LTE. Основной сайт и edge используют одну VM. API: ожидается HTTP 401 без входа, база и данные клиентов не читаются.\n\n[История инцидентов](https://github.com/${REPO}/issues?q=is%3Aissue) · [Все запуски](https://github.com/${REPO}/actions)\n`;
   const stateBody = `${MARKER}\n${summary}\n<!-- state:${JSON.stringify(snapshot)} -->`;
   await github(stateIssue ? `/issues/${stateIssue.number}` : '/issues', stateIssue ? 'PATCH' : 'POST', { title: STATE_TITLE, body: stateBody });
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
