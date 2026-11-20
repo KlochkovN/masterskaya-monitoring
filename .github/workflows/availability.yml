@@ -11,7 +11,7 @@ on:
         default: false
   push:
     branches: [main]
-    paths: ['monitor.mjs', 'monitor.test.mjs', '.github/workflows/availability.yml']
+    paths: ['*.mjs', '.github/workflows/availability.yml']
 permissions:
   contents: read
   issues: write
@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Test monitoring logic
-        run: node --test monitor.test.mjs
+        run: node --test
       - name: Check public endpoints
         run: node monitor.mjs
         env:
