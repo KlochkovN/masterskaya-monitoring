@@ -50,7 +50,8 @@ Email-оповещения отправляет GitHub, а не почта Ма�
 
 ## Проверка и остановка
 
-Локальные тесты: `node --test monitor.test.mjs` (без сети).
+Локальные тесты: `node --test` (14 тестов, без сети). Проверяются ответы,
+ошибки провайдера, создание инцидента, отсутствие дублей и восстановление.
 Остановка: Actions → Availability — Globalping → Disable workflow.
 
 Источники: [Globalping](https://globalping.io/credits),
