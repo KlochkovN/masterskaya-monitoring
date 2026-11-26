@@ -208,6 +208,29 @@ class RunnerTests(unittest.TestCase):
             self.invoke()
         self.assertEqual(self.client.pings, 0)
 
+    def test_dispatch_metadata_can_settle_before_identity_verification(self):
+        original_run = self.client.run
+
+        def settling_run():
+            run = original_run()
+            if self.client.poll_count <= 2:
+                run.update(display_title="Availability — Globalping", status="queued")
+            return run
+
+        with mock.patch.object(self.client, "run", side_effect=settling_run):
+            self.assertEqual(self.invoke()["status"], "completed")
+        self.assertEqual((self.client.posts, self.client.pings), (1, 1))
+        self.assertEqual(self.client.poll_count, 3)
+
+    def test_unverified_identity_times_out_without_heartbeat_or_redispatch(self):
+        self.client.identity_mismatch = True
+        self.client.phase = "queued"
+        started = self.clock.now()
+        with self.assertRaisesRegex(runner.MonitorError, "run_identity_mismatch"):
+            self.invoke()
+        self.assertEqual(self.clock.now() - started, runner.IDENTITY_SETTLE_SECONDS)
+        self.assertEqual((self.client.posts, self.client.pings), (1, 0))
+
     def test_expired_token_fails_without_ping(self):
         self.client.dispatch_error = "github_http_401"
         with self.assertRaisesRegex(runner.MonitorError, "github_http_401"):
