@@ -1,9 +1,13 @@
 name: Availability — Globalping
+run-name: ${{ inputs.external_run_id && format('External monitor {0}', inputs.external_run_id) || 'Availability — Globalping' }}
 on:
-  schedule:
-    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
     inputs:
+      external_run_id:
+        description: 'Correlation ID from the existing-VM clock (leave empty for a manual run)'
+        required: false
+        type: string
+        default: ''
       test_alert:
         description: 'Send a clearly labelled test notification to the owner'
         required: false
@@ -11,7 +15,7 @@ on:
         default: false
   push:
     branches: [main]
-    paths: ['*.mjs', '.github/workflows/availability.yml']
+    paths: ['*.mjs', '*.py', '.github/workflows/availability.yml']
 permissions:
   contents: read
   issues: write
@@ -28,7 +32,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Test monitoring logic
-        run: node --test
+        run: |
+          node --test
+          python3 -m unittest discover -s . -p 'test_dispatch_runner.py'
       - name: Check public endpoints
         run: node monitor.mjs
         env:
