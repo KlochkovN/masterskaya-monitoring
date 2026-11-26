@@ -27,6 +27,7 @@ COOLDOWN_SECONDS = 540
 FRESH_SECONDS = 900
 MISSING_DISPATCH_SECONDS = 900
 TITLE_PREFIX = "External monitor "
+IDENTITY_SETTLE_SECONDS = 30
 
 
 class MonitorError(Exception):
@@ -244,6 +245,12 @@ def run_once(client, store, now=time.time, wait=time.sleep, make_id=lambda: str(
             wait(5)
             continue
         if not run_matches(run, state):
+            # The dispatch API can expose an ID before run-name and other
+            # metadata are populated. Wait briefly, but never accept an
+            # unverified identity or emit a heartbeat for it.
+            if now() - state["attempt_at"] < IDENTITY_SETTLE_SECONDS:
+                wait(5)
+                continue
             raise MonitorError("run_identity_mismatch")
         state["run_id"] = run["id"]
         store.save(state)
