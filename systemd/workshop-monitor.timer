@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Workshop network monitoring every ten minutes
+
+[Timer]
+OnCalendar=*-*-* *:03/10:00 UTC
+AccuracySec=1s
+Persistent=true
+Unit=workshop-monitor.service
+
+[Install]
+WantedBy=timers.target
