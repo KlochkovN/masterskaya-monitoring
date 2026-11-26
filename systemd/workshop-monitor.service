@@ -1,0 +1,29 @@
+[Unit]
+Description=Workshop external probes dispatch and completion watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=workshop-monitor
+StateDirectoryMode=0700
+RuntimeDirectory=workshop-monitor
+RuntimeDirectoryMode=0700
+EnvironmentFile=/etc/workshop-monitor/credentials.env
+ExecStart=/usr/bin/flock -n /run/workshop-monitor/dispatch.lock /usr/bin/python3 /opt/workshop-monitor/dispatch_runner.py
+TimeoutStartSec=420
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
