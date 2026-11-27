@@ -21,6 +21,8 @@ const REPO = 'KlochkovN/masterskaya-monitoring';
 const PROVIDER = 'https://api.globalping.io/v1/measurements';
 const MARKER = '<!-- masterskaya-monitor-v1 -->';
 const STATE_TITLE = 'Мониторинг Мастерской — последний результат';
+export const INCIDENT_MARKER = '<!-- incident:availability-v2 -->';
+export const NOTIFICATION_POLICY = 'confirmed-grouped-v2';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function normalize(target, records) {
@@ -132,6 +134,20 @@ export function parseState(body) {
   } catch { return null; }
 }
 
+export function hasConfirmedFailure(targets) {
+  return targets.some(target => ['down', 'degraded'].includes(target.status));
+}
+
+function incidentBody(targets, { checkedAt, run, startedAt, opening = false, recovered = false }) {
+  const failed = targets.filter(target => ['down', 'degraded'].includes(target.status));
+  const headline = recovered
+    ? '🟢 Доступность всех трёх адресов восстановлена и подтверждена двумя измерениями.'
+    : failed.length
+      ? `🔴 Подтверждён сбой доступности: ${failed.map(target => `${target.name} — ${statusText[target.status].toLowerCase()}`).join('; ')}.`
+      : '⏳ Ранее был подтверждён сбой. Новых подтверждённых отказов нет, но данных для подтверждения полного восстановления пока недостаточно.';
+  return `${MARKER}\n${INCIDENT_MARKER}\n<!-- networks:${NETWORK_CONFIG} -->\n${opening ? '\n@KlochkovN\n' : ''}\n${headline}\n\nНачало эпизода: ${startedAt}.\nПроверено: ${checkedAt}. [Запуск](${run}).\n\n${table(targets)}\n\nОдин эпизод — одно уведомление о сбое и одно о подтверждённом восстановлении. Промежуточные результаты обновляются здесь без комментариев и повторных упоминаний. Отсутствие результата проверки не доказывает отказ приложения.\n\nЭто проверка публичных адресов, не базы, расписания или сохранения записей. Сбой из части сетей не означает недоступность для всех пользователей.`;
+}
+
 export async function main() {
   // Only repository-owned scheduled/manual runs are authorized, never PR code.
   if (!['schedule', 'workflow_dispatch', 'push'].includes(process.env.GITHUB_EVENT_NAME)) throw new Error('Unsupported event');
@@ -139,42 +155,49 @@ export async function main() {
   const issues = await github('/issues?state=open&per_page=100');
   if (!Array.isArray(issues) || issues.length >= 100) throw new Error('Issue inventory needs review');
   const stateIssue = issues.find(x => owned(x) && x.title === STATE_TITLE);
-  const previous = parseState(stateIssue?.body ?? '');
+  const activeIncidents = issues.filter(x => owned(x)
+    && (x.body.includes(INCIDENT_MARKER) || /<!-- target:(?:site|edge-api|yc-api) -->/.test(x.body)));
   const checkedAt = new Date().toISOString();
   const targets = await Promise.all(TARGETS.map(async target => {
     let checks = await measure(target);
-    const active = issues.some(x => owned(x) && x.body.includes(`<!-- target:${target.id} -->`));
-    if (classify(checks) !== 'up' || active) {
+    // An open grouped incident needs two successful measurements of every
+    // target before recovery. Missing results must never close an incident.
+    if (classify(checks) !== 'up' || activeIncidents.length) {
       await sleep(10000);
       checks = confirm(checks, await measure(target));
     }
     return { ...target, status: classify(checks), checks };
   }));
-  for (const target of targets) {
-    const tag = `<!-- target:${target.id} -->`;
-    let existing = issues.find(x => owned(x) && x.body.includes(tag));
-    const networkTag = `<!-- networks:${NETWORK_CONFIG} -->`;
-    // A removed probe becoming irrelevant is not evidence that it recovered.
-    // Retire the old incident explicitly and evaluate the new scope separately.
-    if (existing && !existing.body.includes(networkTag)) {
-      await github(`/issues/${existing.number}/comments`, 'POST', { body: `ℹ️ @KlochkovN Состав проверок изменён: теперь только шесть российских сетей. Прежнее предупреждение закрывается из-за изменения набора проверок, а не как подтверждение восстановления исключённой сети.\n\n${checkedAt}. [Запуск](${run}).` });
-      await github(`/issues/${existing.number}`, 'PATCH', { state: 'closed', state_reason: 'not_planned' });
-      existing = undefined;
-    }
-    const body = `${MARKER}\n${tag}\n${networkTag}\n\n@KlochkovN\n\n${target.name}: **${statusText[target.status]}**.\n\nПроверено: ${checkedAt}. [Запуск](${run}).\n\n${table([target])}\n\nЭто проверка публичного входа, не базы и не сохранения записей. «Не удалось подтвердить» не означает доказанный сбой приложения.`;
-    if (target.status !== 'up' && !existing) {
-      await github('/issues', 'POST', { title: `${target.status === 'unknown' ? '❔' : '🔴'} ${target.name}: ${statusText[target.status]}`, body });
-    } else if (target.status === 'up' && existing) {
-      await github(`/issues/${existing.number}/comments`, 'POST', { body: `🟢 @KlochkovN ${target.name}: доступность подтверждена двумя измерениями.\n\n${checkedAt}. [Запуск](${run}).` });
-      await github(`/issues/${existing.number}`, 'PATCH', { state: 'closed', state_reason: 'completed' });
-    } else if (existing && previous?.targets?.find(x => x.id === target.id)?.status !== target.status) {
-      await github(`/issues/${existing.number}/comments`, 'POST', { body });
-      await github(`/issues/${existing.number}`, 'PATCH', { title: `${target.status === 'unknown' ? '❔' : '🔴'} ${target.name}: ${statusText[target.status]}` });
-    }
+  const networkTag = `<!-- networks:${NETWORK_CONFIG} -->`;
+  const currentIncidents = activeIncidents.filter(x => x.body.includes(INCIDENT_MARKER) && x.body.includes(networkTag));
+  if (currentIncidents.length > 1) throw new Error('Duplicate grouped incidents need review');
+  const existing = currentIncidents[0];
+  // One-time migration only: retain old reports, don't call a changed policy
+  // or removed network "recovered", and don't add another comment email.
+  for (const legacy of activeIncidents.filter(x => x !== existing)) {
+    await github(`/issues/${legacy.number}`, 'PATCH', {
+      body: `${legacy.body}\n\nℹ️ ${checkedAt}: предупреждение архивировано из-за изменения правил оповещения или набора проверок. Это не подтверждение восстановления. [Текущая проверка](${run}).`,
+      state: 'closed', state_reason: 'not_planned',
+    });
   }
-  const snapshot = { version: 1, networkConfig: NETWORK_CONFIG, checkedAt, completedAt: new Date().toISOString(), staleAfterSeconds: 900, targets };
+  const context = { checkedAt, run, startedAt: existing?.created_at ?? checkedAt };
+  if (!existing && hasConfirmedFailure(targets)) {
+    await github('/issues', 'POST', {
+      title: '🔴 Мастерская — подтверждён сбой доступности',
+      body: incidentBody(targets, { ...context, opening: true }),
+    });
+  } else if (existing) {
+    const recovered = targets.every(target => target.status === 'up');
+    await github(`/issues/${existing.number}`, 'PATCH', {
+      body: incidentBody(targets, { ...context, recovered }),
+      // Closing the issue is the recovery notification. A separate comment
+      // would send a second email. No mentions are added to body updates.
+      ...(recovered ? { title: '🟢 Мастерская — доступность восстановлена', state: 'closed', state_reason: 'completed' } : {}),
+    });
+  }
+  const snapshot = { version: 1, notificationPolicy: NOTIFICATION_POLICY, networkConfig: NETWORK_CONFIG, checkedAt, completedAt: new Date().toISOString(), staleAfterSeconds: 900, targets };
   const summary = `## Последний результат\n\nПроверено: **${snapshot.completedAt}** (UTC). [Запуск](${run}).\n\n**Если результату больше 15 минут — текущая доступность неизвестна.** Эта страница не обновляет свой статус сама при остановке GitHub.\n\n${table(targets)}\n\nПлан: каждые ${INTERVAL_MINUTES} минут; GitHub может задерживать или пропускать запуски. Проверки из шести российских городов и сетей: дата-центры и сети доступа. Узел в сети МТС или Билайна не гарантирует проверку именно LTE. Основной сайт и edge используют одну VM. API: ожидается HTTP 401 без входа, база и данные клиентов не читаются.\n\n[История инцидентов](https://github.com/${REPO}/issues?q=is%3Aissue) · [Все запуски](https://github.com/${REPO}/actions)\n`;
-  const stateBody = `${MARKER}\n${summary}\n<!-- state:${JSON.stringify(snapshot)} -->`;
+  const stateBody = `${MARKER}\n${summary}\nОповещения: один общий инцидент только при подтверждённом отказе. Отсутствующие и расходящиеся результаты остаются в журнале, не создавая письма о сбое или восстановлении.\n\n<!-- state:${JSON.stringify(snapshot)} -->`;
   await github(stateIssue ? `/issues/${stateIssue.number}` : '/issues', stateIssue ? 'PATCH' : 'POST', { title: STATE_TITLE, body: stateBody });
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
   console.log(JSON.stringify({ checkedAt, results: targets.map(x => ({ id: x.id, status: x.status })) }));
